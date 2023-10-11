@@ -2,6 +2,7 @@ from typing import Tuple
 
 import torch
 from torch._C import DispatchKey, DispatchKeySet
+from torch.fx.experimental.symbolic_shapes import is_symbolic
 from torch.utils.weak import WeakTensorKeyDictionary
 from typing import *  # noqa: F403
 
@@ -129,6 +130,12 @@ class NestedTensor(torch.Tensor):
         values = inner_tensors["_values"]
         offsets = inner_tensors["_offsets"]
 
+        should_prop = any(any(is_symbolic(s) for s in x.shape) for x in (values, offsets))
+        if not should_prop:
+            # If no inner tensors are symbolic we are going from fake to
+            # non-fake. Make sure we don't leak any SymInts.
+            meta["ragged_size"] = None
+
         return NestedTensor(
             values,
             offsets=offsets,
@@ -155,12 +162,15 @@ class ViewBufferFromNested(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: NestedTensor):  # type: ignore[override]
         ctx.save_for_backward(x.offsets())
+        ctx.kwargs = {
+            "ragged_size": x._size[x._ragged_idx],
+        }
         return x.values()
 
     @staticmethod
     def backward(ctx, gO: torch.Tensor):  # type: ignore[override]
         (offsets,) = ctx.saved_tensors
-        return NestedTensor(gO, offsets=offsets)
+        return NestedTensor(gO, offsets=offsets, **ctx.kwargs)
 
 
 # Not actually a view!
